@@ -373,12 +373,7 @@ impl HecLogsSinkConfig {
             ),
         });
 
-        // Registered only for an active algorithm, so a `none` sink leaves the series absent
-        // (downstream analytics falls back).
-        let effective_bytes = (self.effective_bytes_algorithm != EffectiveBytesAlgorithm::None)
-            .then(|| metrics::counter!("effective_bytes"));
-
-        let service = HecService::new(
+        let mut service = HecService::new(
             http_service,
             ack_client,
             http_request_builder,
@@ -387,8 +382,12 @@ impl HecLogsSinkConfig {
             self.compression,
             rej_ctx,
             cx.globals.ops_limits.compression,
-            effective_bytes,
         );
+        // Registered only for an active algorithm, so a `none` sink leaves the series absent
+        // (downstream analytics falls back).
+        if self.effective_bytes_algorithm != EffectiveBytesAlgorithm::None {
+            service = service.with_effective_bytes(metrics::counter!("effective_bytes"));
+        }
 
         let batch_settings = self.batch.into_batcher_settings()?;
 
@@ -418,9 +417,16 @@ impl HecLogsSinkConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use chrono::{TimeZone, Utc};
     use indexmap::IndexMap;
     use metrics::{
         Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
     };
     use super::*;
     use crate::components::validation::prelude::*;
@@ -681,17 +687,32 @@ mod tests {
         );
     }
 
-    /// Records the names of registered counters.
+    /// Records registered counters by name, with their current values.
     #[derive(Default)]
-    struct RegisteredCounters(std::sync::Mutex<Vec<String>>);
+    struct RegisteredCounters(std::sync::Mutex<Vec<(String, Arc<AtomicU64>)>>);
+
+    impl RegisteredCounters {
+        fn value(&self, name: &str) -> Option<u64> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(registered, _)| registered == name)
+                .map(|(_, value)| value.load(Ordering::Relaxed))
+        }
+    }
 
     impl Recorder for RegisteredCounters {
         fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
         fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
         fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
         fn register_counter(&self, key: &Key, _: &Metadata<'_>) -> Counter {
-            self.0.lock().unwrap().push(key.name().to_owned());
-            Counter::noop()
+            let value = Arc::new(AtomicU64::new(0));
+            self.0
+                .lock()
+                .unwrap()
+                .push((key.name().to_owned(), Arc::clone(&value)));
+            Counter::from_arc(value)
         }
         fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
             Gauge::noop()
@@ -718,13 +739,7 @@ mod tests {
                 .build_processor(client, SinkContext::default())
                 .unwrap();
         });
-        let registered = recorder
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|name| name == "effective_bytes");
-        registered
+        recorder.value("effective_bytes").is_some()
     }
 
     #[tokio::test]
@@ -735,6 +750,66 @@ mod tests {
     #[tokio::test]
     async fn none_algorithm_registers_no_effective_bytes_counter() {
         assert!(!registers_effective_bytes("none"));
+    }
+
+    /// Runs two events through the full sink (encoder, request builder, service) against a mock HEC
+    /// endpoint answering `status`, and returns the `effective_bytes` counter afterwards.
+    async fn sink_effective_bytes(status: u16) -> u64 {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/services/collector/event"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let config = hec_logs_config_from_toml(&format!(
+            r#"
+            default_token = "t"
+            endpoint = "{}"
+            source = "src"
+            sourcetype = "type"
+            index = "idx"
+            effective_bytes_algorithm = "value_bytes"
+            [encoding]
+            codec = "json"
+            [acknowledgements]
+            indexer_acknowledgements_enabled = false
+            "#,
+            server.uri()
+        ));
+        let client = HttpClient::new(None, &Default::default(), &crate::app_info()).unwrap();
+        let recorder = RegisteredCounters::default();
+        let sink = metrics::with_local_recorder(&recorder, || {
+            config
+                .build_processor(client, SinkContext::default())
+                .unwrap()
+        });
+
+        let event = || {
+            let mut log = crate::event::LogEvent::from("hello world");
+            log.insert("key", "value");
+            log.insert(
+                crate::config::log_schema()
+                    .timestamp_key_target_path()
+                    .unwrap(),
+                Utc.timestamp_nanos(1_638_366_107_111_456_123),
+            );
+            crate::event::Event::from(log)
+        };
+        sink.run_events(vec![event(), event()]).await.unwrap();
+
+        recorder.value("effective_bytes").unwrap()
+    }
+
+    #[tokio::test]
+    async fn sink_counts_effective_bytes_of_delivered_events() {
+        // Per event: "hello world"(11) + "value"(5) + "src"(3) + "type"(4) + "idx"(3) + the
+        // timestamp moved into `time`, "1638366107.111"(14) = 40.
+        assert_eq!(sink_effective_bytes(200).await, 2 * 40);
+    }
+
+    #[tokio::test]
+    async fn sink_counts_no_effective_bytes_for_rejected_events() {
+        assert_eq!(sink_effective_bytes(400).await, 0);
     }
 
     impl ValidatableComponent for HecLogsSinkConfig {

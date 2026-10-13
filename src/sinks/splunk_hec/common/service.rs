@@ -93,7 +93,6 @@ where
         compression: Compression,
         rej_ctx: Arc<HecRejectionContext>,
         compression_limits: CompressionLimits,
-        effective_bytes: Option<Counter>,
     ) -> Self {
         let max_pending_acks = indexer_acknowledgements.max_pending_acks.get();
         let tx = if let Some(ack_client) = ack_client {
@@ -119,8 +118,14 @@ where
             compression,
             rej_ctx,
             compression_limits,
-            effective_bytes,
+            effective_bytes: None,
         }
+    }
+
+    /// Counts the effective bytes of every delivered batch on `counter`.
+    pub fn with_effective_bytes(mut self, counter: Counter) -> Self {
+        self.effective_bytes = Some(counter);
+        self
     }
 }
 
@@ -462,7 +467,6 @@ mod tests {
             Compression::default(),
             test_context(),
             CompressionLimits::default(),
-            None,
         )
     }
 
@@ -522,7 +526,6 @@ mod tests {
             Compression::default(),
             test_context(),
             CompressionLimits::default(),
-            None,
         )
     }
 
@@ -850,7 +853,6 @@ mod tests {
             Compression::default(),
             test_context(),
             CompressionLimits::default(),
-            None,
         );
 
         let request = get_hec_request();
@@ -902,7 +904,6 @@ mod tests {
             Compression::default(),
             test_context(),
             CompressionLimits::default(),
-            None,
         );
 
         let request = get_hec_request();
@@ -966,7 +967,6 @@ mod tests {
             Compression::default(),
             test_context(),
             CompressionLimits::default(),
-            None,
         );
 
         let request = get_hec_request();
@@ -1067,8 +1067,8 @@ mod tests {
                 mock_server.uri(),
                 RejectionReport::Stats,
                 no_ack_config(),
-            );
-            service.effective_bytes = Some(metrics::Counter::from_arc(Arc::clone(&count)));
+            )
+            .with_effective_bytes(metrics::Counter::from_arc(Arc::clone(&count)));
             let request = HecRequest {
                 effective_bytes: 42,
                 ..get_hec_request()

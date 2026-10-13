@@ -228,7 +228,6 @@ impl HecMetricsSinkConfig {
             self.compression,
             rej_ctx,
             cx.globals.ops_limits.compression,
-            None,
         );
 
         let batch_settings = self.batch.into_batcher_settings()?;
