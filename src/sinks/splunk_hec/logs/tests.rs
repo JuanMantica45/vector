@@ -177,6 +177,7 @@ fn hec_encoder(encoding: EncodingConfig) -> HecLogsEncoder {
         transformer,
         encoder,
         auto_extract_timestamp: false,
+        preserve_timestamp_key: false,
         effective_bytes_algorithm: Default::default(),
     }
 }
@@ -1404,89 +1405,135 @@ mod effective_bytes_emission {
     use vector_lib::codecs::{JsonSerializerConfig, TextSerializerConfig};
 
     use crate::codecs::{Encoder, EncodingConfig};
-    use crate::sinks::splunk_hec::common::{EffectiveBytesAlgorithm, EndpointTarget, SentEvent};
+    use crate::sinks::splunk_hec::common::{
+        EffectiveBytesAlgorithm, EndpointTarget, SentEvent, SentMetadata,
+    };
     use crate::sinks::splunk_hec::logs::{encoder::HecLogsEncoder, sink::HecProcessedEvent};
 
-    fn effective_bytes(
-        encoding: EncodingConfig,
-        algorithm: EffectiveBytesAlgorithm,
-        input: Vec<HecProcessedEvent>,
-    ) -> Option<u64> {
-        let encoder = HecLogsEncoder {
+    /// "test_source"(11) + "test_sourcetype"(15) + "test_index"(10), sent with every fixture event.
+    const METADATA_BYTES: u64 = 36;
+    /// The fixture timestamp sent as `time`: "1638366107.111".
+    const TIME_BYTES: u64 = 14;
+
+    fn hec_encoder(encoding: EncodingConfig, algorithm: EffectiveBytesAlgorithm) -> HecLogsEncoder {
+        HecLogsEncoder {
             transformer: encoding.transformer(),
             encoder: Encoder::<()>::new(encoding.build().unwrap()),
             auto_extract_timestamp: false,
+            preserve_timestamp_key: false,
             effective_bytes_algorithm: algorithm,
-        };
+        }
+    }
+
+    fn json_encoder() -> HecLogsEncoder {
+        hec_encoder(
+            JsonSerializerConfig::default().into(),
+            EffectiveBytesAlgorithm::ValueBytes,
+        )
+    }
+
+    fn text_encoder() -> HecLogsEncoder {
+        hec_encoder(
+            TextSerializerConfig::default().into(),
+            EffectiveBytesAlgorithm::ValueBytes,
+        )
+    }
+
+    fn effective_bytes(encoder: HecLogsEncoder, input: Vec<HecProcessedEvent>) -> u64 {
         let (_, _, effective_bytes) = encoder.encode_batch(input, &mut Vec::new()).unwrap();
         effective_bytes
     }
 
-    fn json_value_bytes(processed: &HecProcessedEvent) -> u64 {
-        EffectiveBytesAlgorithm::ValueBytes
-            .measure(SentEvent::Json(processed.event.value()))
-            .unwrap()
+    /// Value bytes of the fixture event body alone.
+    fn body_bytes(processed: &HecProcessedEvent) -> u64 {
+        EffectiveBytesAlgorithm::ValueBytes.measure(
+            SentEvent::Json(processed.event.value()),
+            &SentMetadata::default(),
+        )
+    }
+
+    fn raw_event() -> HecProcessedEvent {
+        let mut processed = super::get_processed_event();
+        processed.metadata.endpoint_target = EndpointTarget::Raw;
+        processed
     }
 
     #[test]
     fn value_bytes_algorithm_sums_batch() {
         let input = vec![super::get_processed_event(), super::get_processed_event()];
-        let expected = input.iter().map(json_value_bytes).sum::<u64>();
-        assert!(expected > 0, "test fixture should carry value bytes");
+        let expected = input
+            .iter()
+            .map(|processed| body_bytes(processed) + METADATA_BYTES + TIME_BYTES)
+            .sum::<u64>();
 
-        let actual = effective_bytes(
-            JsonSerializerConfig::default().into(),
-            EffectiveBytesAlgorithm::ValueBytes,
-            input,
-        );
-        assert_eq!(actual, Some(expected));
+        assert_eq!(effective_bytes(json_encoder(), input), expected);
+    }
+
+    #[test]
+    fn value_bytes_algorithm_skips_time_when_timestamp_stays_in_event() {
+        // With `preserve_timestamp_key` the timestamp is counted in the event body, so `time` is
+        // not counted again.
+        let processed = super::get_processed_event();
+        let expected = body_bytes(&processed) + METADATA_BYTES;
+        let encoder = HecLogsEncoder {
+            preserve_timestamp_key: true,
+            ..json_encoder()
+        };
+
+        assert_eq!(effective_bytes(encoder, vec![processed]), expected);
+    }
+
+    #[test]
+    fn value_bytes_algorithm_skips_time_when_not_sent() {
+        // With `auto_extract_timestamp` no `time` is sent.
+        let processed = super::get_processed_event();
+        let expected = body_bytes(&processed) + METADATA_BYTES;
+        let encoder = HecLogsEncoder {
+            auto_extract_timestamp: true,
+            ..json_encoder()
+        };
+
+        assert_eq!(effective_bytes(encoder, vec![processed]), expected);
     }
 
     #[test]
     fn value_bytes_algorithm_counts_raw_endpoint_json_events() {
-        let mut processed = super::get_processed_event();
-        processed.metadata.endpoint_target = EndpointTarget::Raw;
-        let expected = json_value_bytes(&processed);
+        // The raw endpoint sends no `time`; its metadata still counts once per event.
+        let processed = raw_event();
+        let expected = body_bytes(&processed) + METADATA_BYTES;
 
-        let actual = effective_bytes(
-            JsonSerializerConfig::default().into(),
-            EffectiveBytesAlgorithm::ValueBytes,
-            vec![processed],
-        );
-        assert_eq!(actual, Some(expected));
+        assert_eq!(effective_bytes(json_encoder(), vec![processed]), expected);
     }
 
     #[test]
     fn value_bytes_algorithm_counts_only_sent_text_on_event_endpoint() {
         // The text codec sends only the message as the HEC `event` string, so the event's other
         // fields must not be counted.
-        let actual = effective_bytes(
-            TextSerializerConfig::default().into(),
-            EffectiveBytesAlgorithm::ValueBytes,
-            vec![super::get_processed_event()],
+        let expected = "hello world".len() as u64 + METADATA_BYTES + TIME_BYTES;
+
+        assert_eq!(
+            effective_bytes(text_encoder(), vec![super::get_processed_event()]),
+            expected
         );
-        assert_eq!(actual, Some("hello world".len() as u64));
     }
 
     #[test]
     fn value_bytes_algorithm_counts_only_sent_text_on_raw_endpoint() {
-        let mut processed = super::get_processed_event();
-        processed.metadata.endpoint_target = EndpointTarget::Raw;
-        let actual = effective_bytes(
-            TextSerializerConfig::default().into(),
-            EffectiveBytesAlgorithm::ValueBytes,
-            vec![processed],
-        );
-        assert_eq!(actual, Some("hello world".len() as u64));
+        let expected = "hello world".len() as u64 + METADATA_BYTES;
+
+        assert_eq!(effective_bytes(text_encoder(), vec![raw_event()]), expected);
     }
 
     #[test]
     fn none_algorithm_computes_no_effective_bytes() {
-        let actual = effective_bytes(
+        let encoder = hec_encoder(
             JsonSerializerConfig::default().into(),
             EffectiveBytesAlgorithm::None,
-            vec![super::get_processed_event()],
         );
-        assert_eq!(actual, None);
+
+        assert_eq!(
+            effective_bytes(encoder, vec![super::get_processed_event()]),
+            0
+        );
     }
 }

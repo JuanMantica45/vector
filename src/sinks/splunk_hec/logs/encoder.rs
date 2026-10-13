@@ -12,7 +12,7 @@ use crate::{
     event::{Event, LogEvent},
     internal_events::SplunkEventEncodeError,
     sinks::{
-        splunk_hec::common::{EffectiveBytesAlgorithm, EndpointTarget, SentEvent},
+        splunk_hec::common::{EffectiveBytesAlgorithm, EndpointTarget, SentEvent, SentMetadata},
         util::encoding::Encoder,
     },
 };
@@ -61,22 +61,24 @@ pub struct HecLogsEncoder {
     pub transformer: Transformer,
     pub encoder: crate::codecs::Encoder<()>,
     pub auto_extract_timestamp: bool,
+    /// Whether the extracted timestamp also stays in the event, so `time` is not counted again.
+    pub preserve_timestamp_key: bool,
     pub effective_bytes_algorithm: EffectiveBytesAlgorithm,
 }
 
 impl HecLogsEncoder {
     /// Encodes the batch like [`Encoder::encode_input`], also returning the batch's effective bytes
-    /// (`None` when the algorithm is `none`).
+    /// (`0` when the algorithm is `none`).
     pub fn encode_batch(
         &self,
         input: Vec<HecProcessedEvent>,
         writer: &mut dyn std::io::Write,
-    ) -> std::io::Result<(usize, GroupedCountByteSize, Option<u64>)> {
+    ) -> std::io::Result<(usize, GroupedCountByteSize, u64)> {
         let mut encoder = self.encoder.clone();
         let mut byte_size = telemetry().create_request_count_byte_size();
         let algorithm = self.effective_bytes_algorithm;
         let sends_json = encoder.serializer().supports_json();
-        let mut effective_bytes: Option<u64> = None;
+        let mut effective_bytes: u64 = 0;
         let encoded_input: Vec<u8> = input
             .into_iter()
             .filter_map(|processed_event| {
@@ -87,28 +89,41 @@ impl HecLogsEncoder {
                 byte_size.add_event(&event, event.estimated_json_encoded_size_of());
 
                 let mut bytes = BytesMut::new();
+                // If auto_extract_timestamp is set we don't want to pass the timestamp in the
+                // event since we want Splunk to extract it from the message.
+                let time = if self.auto_extract_timestamp {
+                    None
+                } else {
+                    metadata.timestamp
+                };
+                let sent_metadata = SentMetadata {
+                    source: metadata.source.as_deref(),
+                    sourcetype: metadata.sourcetype.as_deref(),
+                    index: metadata.index.as_deref(),
+                    time: match metadata.endpoint_target {
+                        EndpointTarget::Event => time.filter(|_| !self.preserve_timestamp_key),
+                        EndpointTarget::Raw => None,
+                    },
+                };
                 // A JSON codec is measured before encoding consumes the event, any other codec from
                 // its encoded text. Counted only once the event is encoded.
                 let mut measured = if sends_json {
-                    algorithm.measure(SentEvent::Json(event.as_log().value()))
+                    algorithm.measure(SentEvent::Json(event.as_log().value()), &sent_metadata)
                 } else {
-                    None
+                    0
                 };
 
                 match metadata.endpoint_target {
                     EndpointTarget::Raw => {
                         encoder.encode(event, &mut bytes).ok()?;
                         if !sends_json {
-                            measured = algorithm.measure(SentEvent::Text(&bytes));
+                            measured = algorithm.measure(SentEvent::Text(&bytes), &sent_metadata);
                         }
-                        if let Some(measured) = measured {
-                            *effective_bytes.get_or_insert(0) += measured;
-                        }
-                        Some(bytes.to_vec())
+                        Some((bytes.to_vec(), measured))
                     }
                     EndpointTarget::Event => {
                         let serializer = encoder.serializer();
-                        let hec_event = if serializer.supports_json() {
+                        let hec_event = if sends_json {
                             HecEvent::Json(
                                 serializer
                                     .to_json_value(event)
@@ -117,21 +132,14 @@ impl HecLogsEncoder {
                             )
                         } else {
                             encoder.encode(event, &mut bytes).ok()?;
-                            measured = algorithm.measure(SentEvent::Text(&bytes));
-                            HecEvent::Text(String::from_utf8_lossy(&bytes))
+                            // Measured from the lossy string, as that is what is sent.
+                            let text = String::from_utf8_lossy(&bytes);
+                            measured =
+                                algorithm.measure(SentEvent::Text(text.as_bytes()), &sent_metadata);
+                            HecEvent::Text(text)
                         };
 
-                        let mut hec_data = HecData::new(
-                            hec_event,
-                            metadata.fields,
-                            // If auto_extract_timestamp is set we don't want to pass the timestamp in the
-                            // event since we want Splunk to extract it from the message.
-                            if self.auto_extract_timestamp {
-                                None
-                            } else {
-                                metadata.timestamp
-                            },
-                        );
+                        let mut hec_data = HecData::new(hec_event, metadata.fields, time);
                         hec_data.host = metadata
                             .host
                             .map(|host| host.to_string_lossy().into_owned());
@@ -140,12 +148,7 @@ impl HecLogsEncoder {
                         hec_data.sourcetype = metadata.sourcetype;
 
                         match serde_json::to_vec(&hec_data) {
-                            Ok(value) => {
-                                if let Some(measured) = measured {
-                                    *effective_bytes.get_or_insert(0) += measured;
-                                }
-                                Some(value)
-                            }
+                            Ok(value) => Some((value, measured)),
                             Err(error) => {
                                 emit!(SplunkEventEncodeError {
                                     error: error.into()
@@ -156,7 +159,10 @@ impl HecLogsEncoder {
                     }
                 }
             })
-            .flatten()
+            .flat_map(|(encoded, measured)| {
+                effective_bytes += measured;
+                encoded
+            })
             .collect();
 
         let encoded_size = encoded_input.len();

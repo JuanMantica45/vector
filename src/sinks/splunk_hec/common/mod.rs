@@ -54,8 +54,11 @@ pub enum EndpointTarget {
 pub enum EffectiveBytesAlgorithm {
     /// Sum of the byte-lengths of every scalar JSON *value* in the event, excluding key names at
     /// every depth. With a non-JSON codec, the event's encoded text counts as a single string
-    /// value. Counted only for batches the destination accepts. Approximates AI SIEM (SDL)
-    /// billable value bytes (`sca:bytesToCharge`).
+    /// value. The `source`, `sourcetype` and `index` sent with the event count once per event on
+    /// either endpoint, and so does `time` when the timestamp was moved out of the event. `host`
+    /// and indexed `fields` are copies of event values, so they are not counted again. Counted
+    /// only for batches the destination accepts. Approximates AI SIEM (SDL) billable value bytes
+    /// (`sca:bytesToCharge`).
     ValueBytes,
 
     /// Do not compute effective bytes. The `vector_effective_bytes` metric is not emitted, and
@@ -69,19 +72,40 @@ pub enum SentEvent<'a> {
     /// A JSON codec sends the event's value tree.
     Json(&'a Value),
 
-    /// Any other codec sends the event as encoded text: a single string value.
+    /// Any other codec sends the event as encoded text: a single string value, counted by the bytes
+    /// actually sent.
     Text(&'a [u8]),
 }
 
+/// HEC metadata sent with one event that is not already part of the event itself.
+#[derive(Default)]
+pub struct SentMetadata<'a> {
+    pub source: Option<&'a str>,
+    pub sourcetype: Option<&'a str>,
+    pub index: Option<&'a str>,
+    /// The `time` sent on the event endpoint, only when the timestamp was moved out of the event.
+    pub time: Option<f64>,
+}
+
 impl EffectiveBytesAlgorithm {
-    /// Effective bytes of one sent event, or `None` when the algorithm is `none`.
-    pub fn measure(self, event: SentEvent<'_>) -> Option<u64> {
+    /// Effective bytes of one sent event and its metadata. Always `0` for `none`, without walking
+    /// the event.
+    pub fn measure(self, event: SentEvent<'_>, metadata: &SentMetadata<'_>) -> u64 {
         match self {
-            Self::ValueBytes => Some(match event {
-                SentEvent::Json(value) => value_bytes(value),
-                SentEvent::Text(text) => String::from_utf8_lossy(text).len() as u64,
-            }),
-            Self::None => None,
+            Self::ValueBytes => {
+                let event_bytes = match event {
+                    SentEvent::Json(value) => value_bytes(value),
+                    SentEvent::Text(text) => text.len() as u64,
+                };
+                let metadata_bytes = [metadata.source, metadata.sourcetype, metadata.index]
+                    .into_iter()
+                    .flatten()
+                    .map(|text| text.len() as u64)
+                    .sum::<u64>()
+                    + metadata.time.map_or(0, float_len);
+                event_bytes + metadata_bytes
+            }
+            Self::None => 0,
         }
     }
 }
@@ -93,9 +117,7 @@ fn value_bytes(value: &Value) -> u64 {
         Value::Bytes(bytes) => String::from_utf8_lossy(bytes).len() as u64,
         Value::Regex(regex) => regex.as_str().len() as u64,
         Value::Integer(integer) => display_len(integer),
-        // serde_json writes non-finite floats as `null`.
-        Value::Float(float) => serde_json::Number::from_f64(float.into_inner())
-            .map_or(4, |number| display_len(&number)),
+        Value::Float(float) => float_len(float.into_inner()),
         Value::Boolean(true) => 4,
         Value::Boolean(false) => 5,
         Value::Timestamp(timestamp) => timestamp_to_string(timestamp).len() as u64,
@@ -103,6 +125,11 @@ fn value_bytes(value: &Value) -> u64 {
         Value::Array(array) => array.iter().map(value_bytes).sum(),
         Value::Null => 4,
     }
+}
+
+/// Length of `float` as serialized to JSON. serde_json writes non-finite floats as `null`.
+fn float_len(float: f64) -> u64 {
+    serde_json::Number::from_f64(float).map_or(4, |number| display_len(&number))
 }
 
 /// Length of `value`'s `Display` form, without allocating.
@@ -123,12 +150,13 @@ fn display_len(value: &impl fmt::Display) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EffectiveBytesAlgorithm, SentEvent};
+    use super::{EffectiveBytesAlgorithm, SentEvent, SentMetadata};
     use chrono::{TimeZone, Utc};
     use vrl::value::Value;
 
-    fn measure_json(value: &Value) -> Option<u64> {
-        EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Json(value))
+    fn measure_json(value: &Value) -> u64 {
+        let metadata = SentMetadata::default();
+        EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Json(value), &metadata)
     }
 
     fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
@@ -154,7 +182,7 @@ mod tests {
     fn value_bytes_excludes_key_names() {
         // The design doc example: "high" (4) + "alice" (5) = 9.
         let value = object([("severity", "high".into()), ("user", "alice".into())]);
-        assert_eq!(measure_json(&value), Some(9));
+        assert_eq!(measure_json(&value), 9);
     }
 
     #[test]
@@ -184,27 +212,53 @@ mod tests {
             ("empty", Value::from(Vec::<Value>::new())),
         ]);
         let expected = serialized_value_bytes(&serde_json::to_value(&value).unwrap());
-        assert_eq!(measure_json(&value), Some(expected));
+        assert_eq!(measure_json(&value), expected);
+    }
+
+    fn measure_text(text: &[u8]) -> u64 {
+        EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Text(text), &SentMetadata::default())
     }
 
     #[test]
     fn value_bytes_counts_text_payload_as_one_string_value() {
+        assert_eq!(measure_text(b"hello world"), 11);
+    }
+
+    #[test]
+    fn value_bytes_counts_text_by_bytes_sent() {
+        // Not the lossy UTF-8 length, which would count each invalid byte as 3.
+        assert_eq!(measure_text(b"a\xffb"), 3);
+    }
+
+    #[test]
+    fn value_bytes_counts_sent_metadata_once() {
+        let metadata = SentMetadata {
+            source: Some("src"),
+            sourcetype: Some("type"),
+            index: None,
+            time: Some(1_638_366_107.111),
+        };
+        // "hello"(5) + "src"(3) + "type"(4) + "1638366107.111"(14) = 26.
         assert_eq!(
-            EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Text(b"hello world")),
-            Some(11)
+            EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Text(b"hello"), &metadata),
+            26
         );
     }
 
     #[test]
     fn none_measures_nothing() {
         let value = Value::from("hello world");
+        let metadata = SentMetadata {
+            source: Some("src"),
+            ..SentMetadata::default()
+        };
         assert_eq!(
-            EffectiveBytesAlgorithm::None.measure(SentEvent::Json(&value)),
-            None
+            EffectiveBytesAlgorithm::None.measure(SentEvent::Json(&value), &metadata),
+            0
         );
         assert_eq!(
-            EffectiveBytesAlgorithm::None.measure(SentEvent::Text(b"hello")),
-            None
+            EffectiveBytesAlgorithm::None.measure(SentEvent::Text(b"hello"), &metadata),
+            0
         );
     }
 }

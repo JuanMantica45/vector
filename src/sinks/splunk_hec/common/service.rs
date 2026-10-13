@@ -169,7 +169,10 @@ where
         let metadata = std::mem::take(req.metadata_mut());
         let events_count = metadata.event_count();
         let events_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
-        let effective_bytes = req.effective_bytes.zip(self.effective_bytes.clone());
+        let effective_bytes = self
+            .effective_bytes
+            .clone()
+            .map(|counter| (counter, req.effective_bytes));
         let response = self.inner.call(req);
 
         Box::pin(async move {
@@ -237,7 +240,7 @@ where
             // Counted only once delivered, so rejected batches never count and retries (which
             // happen below this service) never count twice.
             if event_status == EventStatus::Delivered {
-                if let Some((bytes, counter)) = effective_bytes {
+                if let Some((counter, bytes)) = effective_bytes {
                     counter.increment(bytes);
                 }
             }
@@ -546,7 +549,7 @@ mod tests {
             sourcetype: None,
             host: None,
             headers: vec![],
-            effective_bytes: None,
+            effective_bytes: 0,
         }
     }
 
@@ -1067,7 +1070,7 @@ mod tests {
             );
             service.effective_bytes = Some(metrics::Counter::from_arc(Arc::clone(&count)));
             let request = HecRequest {
-                effective_bytes: Some(42),
+                effective_bytes: 42,
                 ..get_hec_request()
             };
 

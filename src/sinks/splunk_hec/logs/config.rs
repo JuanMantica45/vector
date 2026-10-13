@@ -327,6 +327,10 @@ impl HecLogsSinkConfig {
             transformer,
             encoder,
             auto_extract_timestamp: self.auto_extract_timestamp.unwrap_or_default(),
+            preserve_timestamp_key: self
+                .timestamp_configuration
+                .as_ref()
+                .is_some_and(|config| config.preserve_timestamp_key),
             effective_bytes_algorithm: self.effective_bytes_algorithm,
         };
         let request_builder = HecLogsRequestBuilder {
@@ -667,9 +671,13 @@ mod tests {
             codec = "json"
             "#,
         );
+        // raw_bytes is not a defined variant in Phase 1 and must be rejected at deserialization.
+        let error = result
+            .expect_err("raw_bytes must not deserialize")
+            .to_string();
         assert!(
-            result.is_err(),
-            "raw_bytes is not a defined variant in Phase 1 and must be rejected at deserialization"
+            error.contains("unknown variant `raw_bytes`"),
+            "unexpected error: {error}"
         );
     }
 

@@ -25,14 +25,17 @@ pub struct HecLogsRequestBuilder {
 /// Encoded batch body, carrying the batch's effective bytes through to its `HecRequest`.
 pub struct HecLogsPayload {
     body: Bytes,
-    effective_bytes: Option<u64>,
+    effective_bytes: u64,
 }
 
+/// Only exists to satisfy the `RequestBuilder::Payload` bound. A payload built this way carries no
+/// effective bytes: they reach the request only through the `encode_events` override below, so
+/// removing that override would silently stop `vector_effective_bytes`.
 impl From<Bytes> for HecLogsPayload {
     fn from(body: Bytes) -> Self {
         Self {
             body,
-            effective_bytes: None,
+            effective_bytes: 0,
         }
     }
 }
@@ -98,7 +101,9 @@ impl RequestBuilder<(Option<Partitioned>, Vec<HecProcessedEvent>)> for HecLogsRe
         )
     }
 
-    /// Same as the default `encode_events`, except the payload also carries the effective bytes.
+    /// Same as the default `RequestBuilder::encode_events` (`sinks/util/request_builder.rs`), except
+    /// the payload also carries the effective bytes. Keep in sync with the default so upstream fixes
+    /// also reach this sink.
     fn encode_events(
         &self,
         events: Self::Events,

@@ -62,7 +62,7 @@ impl RequestBuilder<(Option<Arc<str>>, Vec<HecProcessedEvent>)> for HecMetricsRe
             host: None,
             headers: vec![],
             metadata,
-            effective_bytes: None,
+            effective_bytes: 0,
         }
     }
 }
