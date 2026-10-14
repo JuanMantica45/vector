@@ -327,10 +327,6 @@ impl HecLogsSinkConfig {
             transformer,
             encoder,
             auto_extract_timestamp: self.auto_extract_timestamp.unwrap_or_default(),
-            preserve_timestamp_key: self
-                .timestamp_configuration
-                .as_ref()
-                .is_some_and(|config| config.preserve_timestamp_key),
             effective_bytes_algorithm: self.effective_bytes_algorithm,
         };
         let request_builder = HecLogsRequestBuilder {
@@ -617,53 +613,32 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_bytes_algorithm_defaults_to_none() {
-        let config = hec_logs_config_from_toml(
-            r#"
-            default_token = "t"
-            endpoint = "https://hec.example.com"
-            [encoding]
-            codec = "json"
-            "#,
-        );
-        assert_eq!(
-            config.effective_bytes_algorithm,
-            EffectiveBytesAlgorithm::None
-        );
-    }
-
-    #[test]
-    fn test_effective_bytes_algorithm_parses_value_bytes() {
-        let config = hec_logs_config_from_toml(
-            r#"
-            default_token = "t"
-            endpoint = "https://hec.example.com"
-            effective_bytes_algorithm = "value_bytes"
-            [encoding]
-            codec = "json"
-            "#,
-        );
-        assert_eq!(
-            config.effective_bytes_algorithm,
-            EffectiveBytesAlgorithm::ValueBytes
-        );
-    }
-
-    #[test]
-    fn test_effective_bytes_algorithm_parses_none() {
-        let config = hec_logs_config_from_toml(
-            r#"
-            default_token = "t"
-            endpoint = "https://hec.example.com"
-            effective_bytes_algorithm = "none"
-            [encoding]
-            codec = "json"
-            "#,
-        );
-        assert_eq!(
-            config.effective_bytes_algorithm,
-            EffectiveBytesAlgorithm::None
-        );
+    fn test_effective_bytes_algorithm_parses() {
+        for (setting, expected) in [
+            ("", EffectiveBytesAlgorithm::None),
+            (
+                r#"effective_bytes_algorithm = "value_bytes""#,
+                EffectiveBytesAlgorithm::ValueBytes,
+            ),
+            (
+                r#"effective_bytes_algorithm = "none""#,
+                EffectiveBytesAlgorithm::None,
+            ),
+        ] {
+            let config = hec_logs_config_from_toml(&format!(
+                r#"
+                default_token = "t"
+                endpoint = "https://hec.example.com"
+                {setting}
+                [encoding]
+                codec = "json"
+                "#
+            ));
+            assert_eq!(
+                config.effective_bytes_algorithm, expected,
+                "setting: {setting:?}"
+            );
+        }
     }
 
     #[test]

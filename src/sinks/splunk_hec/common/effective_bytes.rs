@@ -15,13 +15,13 @@ use vrl::value::Value;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectiveBytesAlgorithm {
-    /// Sum of the byte-lengths of every scalar JSON *value* in the event, excluding key names at
-    /// every depth. With a non-JSON codec, the event's encoded text counts as a single string
-    /// value. The `source`, `sourcetype` and `index` sent with the event count once per event on
-    /// either endpoint, and so does `time` when the timestamp was moved out of the event. `host`
-    /// and indexed `fields` are copies of event values, so they are not counted again. Counted
-    /// only for batches the destination accepts. Approximates AI SIEM (SDL) billable value bytes
-    /// (`sca:bytesToCharge`).
+    /// Sum of the byte-lengths of every scalar JSON *value* sent for the event, excluding key names
+    /// at every depth: the event as the codec sends it (with a non-JSON codec, its encoded text
+    /// counts as a single string value), plus the `host`, `source`, `sourcetype` and `index` sent
+    /// with it, and on the event endpoint the indexed `fields` and `time`. Metadata counts once per
+    /// event on either endpoint, and a value sent twice (such as an indexed field also kept in the
+    /// event) counts twice. Counted only for batches the destination accepts. Approximates AI SIEM
+    /// (SDL) billable value bytes (`sca:bytesToCharge`).
     ValueBytes,
 
     /// Do not compute effective bytes. The `vector_effective_bytes` metric is not emitted, and
@@ -30,23 +30,29 @@ pub enum EffectiveBytesAlgorithm {
     None,
 }
 
-/// What a sink's codec sends for one event.
+/// What a sink's codec sends as one event.
 pub enum SentEvent<'a> {
-    /// A JSON codec sends the event's value tree.
-    Json(&'a Value),
+    /// A JSON codec's value tree, as built for sending.
+    Json(&'a serde_json::Value),
 
-    /// Any other codec sends the event as encoded text: a single string value, counted by the bytes
-    /// actually sent.
+    /// A JSON codec's event, measured from the event itself where no value tree is built for
+    /// sending. Matches what is sent for the `json` codec.
+    Value(&'a Value),
+
+    /// Any other codec's encoded text: a single string value, counted by the bytes actually sent.
     Text(&'a [u8]),
 }
 
-/// HEC metadata sent with one event that is not already part of the event itself.
+/// HEC metadata sent with one event.
 #[derive(Default)]
 pub struct SentMetadata<'a> {
+    pub host: Option<&'a str>,
     pub source: Option<&'a str>,
     pub sourcetype: Option<&'a str>,
     pub index: Option<&'a str>,
-    /// The `time` sent on the event endpoint, only when the timestamp was moved out of the event.
+    /// The indexed `fields` sent on the event endpoint.
+    pub fields: Option<&'a Value>,
+    /// The `time` sent on the event endpoint.
     pub time: Option<f64>,
 }
 
@@ -57,14 +63,21 @@ impl EffectiveBytesAlgorithm {
         match self {
             Self::ValueBytes => {
                 let event_bytes = match event {
-                    SentEvent::Json(value) => value_bytes(value),
+                    SentEvent::Json(json) => json_value_bytes(json),
+                    SentEvent::Value(value) => value_bytes(value),
                     SentEvent::Text(text) => text.len() as u64,
                 };
-                let metadata_bytes = [metadata.source, metadata.sourcetype, metadata.index]
-                    .into_iter()
-                    .flatten()
-                    .map(|text| text.len() as u64)
-                    .sum::<u64>()
+                let metadata_bytes = [
+                    metadata.host,
+                    metadata.source,
+                    metadata.sourcetype,
+                    metadata.index,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|text| text.len() as u64)
+                .sum::<u64>()
+                    + metadata.fields.map_or(0, value_bytes)
                     + metadata.time.map_or(0, float_len);
                 event_bytes + metadata_bytes
             }
@@ -87,6 +100,19 @@ fn value_bytes(value: &Value) -> u64 {
         Value::Object(object) => object.values().map(value_bytes).sum(),
         Value::Array(array) => array.iter().map(value_bytes).sum(),
         Value::Null => 4,
+    }
+}
+
+/// [`value_bytes`] for a value tree already serialized to JSON.
+fn json_value_bytes(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::String(string) => string.len() as u64,
+        serde_json::Value::Number(number) => display_len(number),
+        serde_json::Value::Bool(true) => 4,
+        serde_json::Value::Bool(false) => 5,
+        serde_json::Value::Null => 4,
+        serde_json::Value::Array(array) => array.iter().map(json_value_bytes).sum(),
+        serde_json::Value::Object(object) => object.values().map(json_value_bytes).sum(),
     }
 }
 
@@ -131,9 +157,8 @@ mod tests {
     use chrono::{NaiveDate, TimeZone, Utc};
     use vrl::value::Value;
 
-    fn measure_json(value: &Value) -> u64 {
-        let metadata = SentMetadata::default();
-        EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Json(value), &metadata)
+    fn measure(event: SentEvent<'_>) -> u64 {
+        EffectiveBytesAlgorithm::ValueBytes.measure(event, &SentMetadata::default())
     }
 
     fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
@@ -145,7 +170,7 @@ mod tests {
         )
     }
 
-    /// Reference count over the serialized JSON, which `value_bytes` must match.
+    /// Reference count over the serialized JSON, which both walks must match.
     fn serialized_value_bytes(value: &serde_json::Value) -> u64 {
         match value {
             serde_json::Value::String(string) => string.len() as u64,
@@ -159,7 +184,7 @@ mod tests {
     fn value_bytes_excludes_key_names() {
         // The design doc example: "high" (4) + "alice" (5) = 9.
         let value = object([("severity", "high".into()), ("user", "alice".into())]);
-        assert_eq!(measure_json(&value), 9);
+        assert_eq!(measure(SentEvent::Value(&value)), 9);
     }
 
     #[test]
@@ -194,37 +219,38 @@ mod tests {
             ),
             ("empty", Value::from(Vec::<Value>::new())),
         ]);
-        let expected = serialized_value_bytes(&serde_json::to_value(&value).unwrap());
-        assert_eq!(measure_json(&value), expected);
-    }
-
-    fn measure_text(text: &[u8]) -> u64 {
-        EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Text(text), &SentMetadata::default())
+        let json = serde_json::to_value(&value).unwrap();
+        let expected = serialized_value_bytes(&json);
+        assert_eq!(measure(SentEvent::Value(&value)), expected);
+        assert_eq!(measure(SentEvent::Json(&json)), expected);
     }
 
     #[test]
     fn value_bytes_counts_text_payload_as_one_string_value() {
-        assert_eq!(measure_text(b"hello world"), 11);
+        assert_eq!(measure(SentEvent::Text(b"hello world")), 11);
     }
 
     #[test]
     fn value_bytes_counts_text_by_bytes_sent() {
         // Not the lossy UTF-8 length, which would count each invalid byte as 3.
-        assert_eq!(measure_text(b"a\xffb"), 3);
+        assert_eq!(measure(SentEvent::Text(b"a\xffb")), 3);
     }
 
     #[test]
-    fn value_bytes_counts_sent_metadata_once() {
+    fn value_bytes_counts_sent_metadata() {
+        let fields = object([("user", "alice".into())]);
         let metadata = SentMetadata {
+            host: Some("web1"),
             source: Some("src"),
             sourcetype: Some("type"),
             index: None,
+            fields: Some(&fields),
             time: Some(1_638_366_107.111),
         };
-        // "hello"(5) + "src"(3) + "type"(4) + "1638366107.111"(14) = 26.
+        // "hello"(5) + "web1"(4) + "src"(3) + "type"(4) + "alice"(5) + "1638366107.111"(14) = 35.
         assert_eq!(
             EffectiveBytesAlgorithm::ValueBytes.measure(SentEvent::Text(b"hello"), &metadata),
-            26
+            35
         );
     }
 
@@ -236,7 +262,7 @@ mod tests {
             ..SentMetadata::default()
         };
         assert_eq!(
-            EffectiveBytesAlgorithm::None.measure(SentEvent::Json(&value), &metadata),
+            EffectiveBytesAlgorithm::None.measure(SentEvent::Value(&value), &metadata),
             0
         );
         assert_eq!(

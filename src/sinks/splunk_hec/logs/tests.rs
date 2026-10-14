@@ -177,7 +177,6 @@ fn hec_encoder(encoding: EncodingConfig) -> HecLogsEncoder {
         transformer,
         encoder,
         auto_extract_timestamp: false,
-        preserve_timestamp_key: false,
         effective_bytes_algorithm: Default::default(),
     }
 }
@@ -1400,11 +1399,11 @@ async fn splunk_enforce_token_without_passthrough() {
     assert_eq!(tokens[0], "Splunk enforced-token");
 }
 
-#[cfg(test)]
 mod effective_bytes_emission {
-    use vector_lib::codecs::{JsonSerializerConfig, TextSerializerConfig};
+    use vector_lib::codecs::{GelfSerializerConfig, JsonSerializerConfig, TextSerializerConfig};
 
-    use crate::codecs::{Encoder, EncodingConfig};
+    use crate::codecs::{EncodingConfig, Transformer};
+    use crate::event::Event;
     use crate::sinks::splunk_hec::common::{
         EffectiveBytesAlgorithm, EndpointTarget, SentEvent, SentMetadata,
     };
@@ -1412,16 +1411,22 @@ mod effective_bytes_emission {
 
     /// "test_source"(11) + "test_sourcetype"(15) + "test_index"(10), sent with every fixture event.
     const METADATA_BYTES: u64 = 36;
+    /// The fixture `host`, "test_host", sent as metadata (and also still in the event).
+    const HOST_BYTES: u64 = 9;
+    /// The fixture indexed `fields`: "test_value1"(11) + "test_value2"(11), also still in the event.
+    const FIELDS_BYTES: u64 = 22;
     /// The fixture timestamp sent as `time`: "1638366107.111".
     const TIME_BYTES: u64 = 14;
+    /// Everything the event endpoint sends besides the event itself.
+    const EVENT_ENDPOINT_METADATA_BYTES: u64 =
+        METADATA_BYTES + HOST_BYTES + FIELDS_BYTES + TIME_BYTES;
+    /// Everything the raw endpoint sends besides the event itself.
+    const RAW_ENDPOINT_METADATA_BYTES: u64 = METADATA_BYTES + HOST_BYTES;
 
     fn hec_encoder(encoding: EncodingConfig, algorithm: EffectiveBytesAlgorithm) -> HecLogsEncoder {
         HecLogsEncoder {
-            transformer: encoding.transformer(),
-            encoder: Encoder::<()>::new(encoding.build().unwrap()),
-            auto_extract_timestamp: false,
-            preserve_timestamp_key: false,
             effective_bytes_algorithm: algorithm,
+            ..super::hec_encoder(encoding)
         }
     }
 
@@ -1447,7 +1452,7 @@ mod effective_bytes_emission {
     /// Value bytes of the fixture event body alone.
     fn body_bytes(processed: &HecProcessedEvent) -> u64 {
         EffectiveBytesAlgorithm::ValueBytes.measure(
-            SentEvent::Json(processed.event.value()),
+            SentEvent::Value(processed.event.value()),
             &SentMetadata::default(),
         )
     }
@@ -1460,34 +1465,22 @@ mod effective_bytes_emission {
 
     #[test]
     fn value_bytes_algorithm_sums_batch() {
+        // `host` and the indexed `fields` are sent twice (in the event and as metadata), so they
+        // count twice.
         let input = vec![super::get_processed_event(), super::get_processed_event()];
         let expected = input
             .iter()
-            .map(|processed| body_bytes(processed) + METADATA_BYTES + TIME_BYTES)
+            .map(|processed| body_bytes(processed) + EVENT_ENDPOINT_METADATA_BYTES)
             .sum::<u64>();
 
         assert_eq!(effective_bytes(json_encoder(), input), expected);
     }
 
     #[test]
-    fn value_bytes_algorithm_skips_time_when_timestamp_stays_in_event() {
-        // With `preserve_timestamp_key` the timestamp is counted in the event body, so `time` is
-        // not counted again.
-        let processed = super::get_processed_event();
-        let expected = body_bytes(&processed) + METADATA_BYTES;
-        let encoder = HecLogsEncoder {
-            preserve_timestamp_key: true,
-            ..json_encoder()
-        };
-
-        assert_eq!(effective_bytes(encoder, vec![processed]), expected);
-    }
-
-    #[test]
     fn value_bytes_algorithm_skips_time_when_not_sent() {
         // With `auto_extract_timestamp` no `time` is sent.
         let processed = super::get_processed_event();
-        let expected = body_bytes(&processed) + METADATA_BYTES;
+        let expected = body_bytes(&processed) + EVENT_ENDPOINT_METADATA_BYTES - TIME_BYTES;
         let encoder = HecLogsEncoder {
             auto_extract_timestamp: true,
             ..json_encoder()
@@ -1497,10 +1490,53 @@ mod effective_bytes_emission {
     }
 
     #[test]
+    fn value_bytes_algorithm_counts_metadata_removed_from_event() {
+        // `except_fields` removes `host` from the event after it was copied into the metadata, so
+        // it is sent, and counted, only once.
+        let processed = super::get_processed_event();
+        let expected = body_bytes(&processed) - HOST_BYTES + EVENT_ENDPOINT_METADATA_BYTES;
+        let except_host = vec!["host_key".into()];
+        let encoder = HecLogsEncoder {
+            transformer: Transformer::new(None, Some(except_host), None, Default::default())
+                .unwrap(),
+            ..json_encoder()
+        };
+
+        assert_eq!(effective_bytes(encoder, vec![processed]), expected);
+    }
+
+    #[test]
+    fn value_bytes_algorithm_measures_the_json_the_codec_sends() {
+        // GELF reshapes the event (adds `version`, renames and prefixes fields), so the measured
+        // tree must be the one GELF produces, not the event's own.
+        let mut processed = super::get_processed_event();
+        processed.event.insert("host", "test_host");
+        let encoding: EncodingConfig = GelfSerializerConfig::default().into();
+        let gelf_json = encoding
+            .build()
+            .unwrap()
+            .to_json_value(Event::from(processed.event.clone()))
+            .unwrap();
+        let gelf_bytes = EffectiveBytesAlgorithm::ValueBytes
+            .measure(SentEvent::Json(&gelf_json), &SentMetadata::default());
+        assert_ne!(
+            gelf_bytes,
+            body_bytes(&processed),
+            "GELF should reshape the event"
+        );
+
+        let encoder = hec_encoder(encoding, EffectiveBytesAlgorithm::ValueBytes);
+        assert_eq!(
+            effective_bytes(encoder, vec![processed]),
+            gelf_bytes + EVENT_ENDPOINT_METADATA_BYTES
+        );
+    }
+
+    #[test]
     fn value_bytes_algorithm_counts_raw_endpoint_json_events() {
-        // The raw endpoint sends no `time`; its metadata still counts once per event.
+        // The raw endpoint sends no `time` or `fields`; its metadata still counts once per event.
         let processed = raw_event();
-        let expected = body_bytes(&processed) + METADATA_BYTES;
+        let expected = body_bytes(&processed) + RAW_ENDPOINT_METADATA_BYTES;
 
         assert_eq!(effective_bytes(json_encoder(), vec![processed]), expected);
     }
@@ -1508,8 +1544,8 @@ mod effective_bytes_emission {
     #[test]
     fn value_bytes_algorithm_counts_only_sent_text_on_event_endpoint() {
         // The text codec sends only the message as the HEC `event` string, so the event's other
-        // fields must not be counted.
-        let expected = "hello world".len() as u64 + METADATA_BYTES + TIME_BYTES;
+        // fields are not counted, but all of the metadata, including `time`, is.
+        let expected = "hello world".len() as u64 + EVENT_ENDPOINT_METADATA_BYTES;
 
         assert_eq!(
             effective_bytes(text_encoder(), vec![super::get_processed_event()]),
@@ -1519,7 +1555,7 @@ mod effective_bytes_emission {
 
     #[test]
     fn value_bytes_algorithm_counts_only_sent_text_on_raw_endpoint() {
-        let expected = "hello world".len() as u64 + METADATA_BYTES;
+        let expected = "hello world".len() as u64 + RAW_ENDPOINT_METADATA_BYTES;
 
         assert_eq!(effective_bytes(text_encoder(), vec![raw_event()]), expected);
     }
