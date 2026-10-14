@@ -132,7 +132,7 @@ Adding `use crate::sources::scol` (or any Observo-touching path) without a `#[cf
 
 ### VRL Fork
 
-This repo depends on `Observo-Inc/vrl.git` (custom fork), not upstream VRL. The rev is pinned in root `Cargo.toml`. For local VRL iteration, see vdev README for git server setup (`git://172.17.0.1/vrl`). Observo VRL extensions (MessagePack, XML, etc.) live in `lib/observo/obvrl` and are wired in via the `observo-vrl` feature on `vector-vrl-functions`.
+This repo depends on `Sentinel-One/vrl.git` (custom fork), not upstream VRL. The rev is pinned in root `Cargo.toml`. For local VRL iteration, see vdev README for git server setup (`git://172.17.0.1/vrl`). Observo VRL extensions (MessagePack, XML, etc.) live in `lib/observo/obvrl` and are wired in via the `observo-vrl` feature on `vector-vrl-functions`.
 
 ### Process-wide CheckpointStore
 
