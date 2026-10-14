@@ -162,7 +162,7 @@ For test placement, commands, and coverage caveats, see [TESTING.md](TESTING.md)
 
 - `.github/workflows/observo.test.yml` — triggers test workflow in external `dataplane-build` repo on PRs and master pushes
 - `.github/workflows/observo.release.yml` — triggers publish workflow on `test.*` or `release.*` tags
-- Actual build/test execution happens in the separate `Observo-Inc/dataplane-build` repo (not in this repo's GitHub Actions)
+- Actual build/test execution happens in the separate `sentinel-one/dataplane-build` repo on GHE (`ghe.eng.sentinelone.tech`) (not in this repo's GitHub Actions)
 
 ## Syncing AGENTS.md from Upstream
 

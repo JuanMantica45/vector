@@ -52,7 +52,7 @@ Commands run from the repository-relative directory shown. Keep required flags u
 ## Prerequisites
 
 - Rust toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) and [cargo-nextest](https://nexte.st) (used by `make test`).
-- Observo builds need the private submodule: `git submodule update --init` ([CLAUDE.md](CLAUDE.md)). Without it, `FEATURES=observo` builds fail.
+- Observo builds need the private submodule ([`sentinel-one/dataplane-private`](https://ghe.eng.sentinelone.tech/sentinel-one/dataplane-private) on GHE): `git submodule update --init` ([CLAUDE.md](CLAUDE.md)). Without it, `FEATURES=observo` builds fail.
 - Service integration tests and `make test-all` need Docker (or Podman); see [docs/DEVELOPING.md](docs/DEVELOPING.md).
 - Cloud integrations (e.g. `aws`, `gcp`, `azure`) may consult ambient credential providers or reach services; check the integration's `test.yaml` and `compose.yaml` before treating them as offline.
 
@@ -60,7 +60,7 @@ Commands run from the repository-relative directory shown. Keep required flags u
 
 - **Flaky-test masking:** nextest retries each failing test 3 times and does not fail fast ([.config/nextest.toml](.config/nextest.toml)). A pass can hide flakiness; look for "flaky" in the summary. Tests are flagged slow at 30s and terminated after four periods (2 min).
 - **Observo coverage:** `make test` and plain `cargo test` skip Observo crates. `cargo test -F observo` without `observo-test` is expected to be incomplete or fail for scenario-dependent tests ([src/sources/scol/mod.rs](src/sources/scol/mod.rs)); use `observo-test`.
-- **CI not in this repo:** per [CLAUDE.md](CLAUDE.md), PR/master tests run in the external `Observo-Inc/dataplane-build` repo via `observo.test.yml`, which is not present in `.github/workflows/` here. What CI runs could not be verified from this checkout. [docs/DEVELOPING.md](docs/DEVELOPING.md) also references an `integration-test.yml` that does not exist here.
+- **CI not in this repo:** per [CLAUDE.md](CLAUDE.md), PR/master tests run in the external [`sentinel-one/dataplane-build`](https://ghe.eng.sentinelone.tech/sentinel-one/dataplane-build) repo on GHE via `observo.test.yml`, which is not present in `.github/workflows/` here. What CI runs could not be verified from this checkout. [docs/DEVELOPING.md](docs/DEVELOPING.md) also references an `integration-test.yml` that does not exist here.
 - **Windows:** Windows uses `FEATURES=default-msvc` and does not apply the Observo exclusion list ([Makefile](Makefile)). The Windows Event Log integration test (`make test-integration-windows-event-log`) runs only on Windows.
 - **Toolchain docs disagree:** [CLAUDE.md](CLAUDE.md) says toolchain 1.83; [rust-toolchain.toml](rust-toolchain.toml) pins 1.88. Trust the latter.
 
