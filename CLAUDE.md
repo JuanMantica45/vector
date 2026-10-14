@@ -132,7 +132,7 @@ Adding `use crate::sources::scol` (or any Observo-touching path) without a `#[cf
 
 ### VRL Fork
 
-This repo depends on `Observo-Inc/vrl.git` (custom fork), not upstream VRL. The rev is pinned in root `Cargo.toml`. For local VRL iteration, see vdev README for git server setup (`git://172.17.0.1/vrl`). Observo VRL extensions (MessagePack, XML, etc.) live in `lib/observo/obvrl` and are wired in via the `observo-vrl` feature on `vector-vrl-functions`.
+This repo depends on `Sentinel-One/vrl.git` (custom fork), not upstream VRL. The rev is pinned in root `Cargo.toml`. For local VRL iteration, see vdev README for git server setup (`git://172.17.0.1/vrl`). Observo VRL extensions (MessagePack, XML, etc.) live in `lib/observo/obvrl` and are wired in via the `observo-vrl` feature on `vector-vrl-functions`.
 
 ### Process-wide CheckpointStore
 
@@ -149,6 +149,8 @@ Observo introduces one deliberate global singleton in `src/topology/builder.rs` 
 
 ## Testing Notes (Observo-specific)
 
+For test placement, commands, and coverage caveats, see [TESTING.md](TESTING.md).
+
 - Default `cargo test` and `make test` skip Observo crates (excluded via `EXCLUDE_WORKSPACES`). Run `FEATURES=observo make test` to include them.
 - `cargo-nextest` retries 3× before reporting failure (config in `.config/nextest.toml`, 30s slow-test threshold, no fail-fast) — flaky tests slip through. Watch the test summary for "flaky retries."
 - `#[tokio::test]` defaults to single-threaded; use `#[tokio::test(flavor = "multi_thread")]` when concurrency is required for the test logic.
@@ -160,7 +162,7 @@ Observo introduces one deliberate global singleton in `src/topology/builder.rs` 
 
 - `.github/workflows/observo.test.yml` — triggers test workflow in external `dataplane-build` repo on PRs and master pushes
 - `.github/workflows/observo.release.yml` — triggers publish workflow on `test.*` or `release.*` tags
-- Actual build/test execution happens in the separate `Observo-Inc/dataplane-build` repo (not in this repo's GitHub Actions)
+- Actual build/test execution happens in the separate `sentinel-one/dataplane-build` repo on GHE (`ghe.eng.sentinelone.tech`) (not in this repo's GitHub Actions)
 
 ## Syncing AGENTS.md from Upstream
 
