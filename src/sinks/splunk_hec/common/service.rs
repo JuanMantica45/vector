@@ -67,7 +67,7 @@ pub struct HecService<S> {
     rej_rpt: RejectionReport,
     compression: Compression,
     rej_ctx: Arc<HecRejectionContext>,
-    /// `vector_effective_bytes` counter, incremented only for delivered batches.
+    /// `vector_effective_bytes_total` counter, incremented only for delivered batches.
     effective_bytes: Option<Counter>,
 }
 

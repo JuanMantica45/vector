@@ -30,7 +30,7 @@ pub struct HecLogsPayload {
 
 /// Only exists to satisfy the `RequestBuilder::Payload` bound. A payload built this way carries no
 /// effective bytes: they reach the request only through the `encode_events` override below, so
-/// removing that override would silently stop `vector_effective_bytes`.
+/// removing that override would silently stop `vector_effective_bytes_total`.
 impl From<Bytes> for HecLogsPayload {
     fn from(body: Bytes) -> Self {
         Self {

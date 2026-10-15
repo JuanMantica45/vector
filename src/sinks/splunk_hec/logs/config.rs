@@ -382,7 +382,7 @@ impl HecLogsSinkConfig {
         // Registered only for an active algorithm, so a `none` sink leaves the series absent
         // (downstream analytics falls back).
         if self.effective_bytes_algorithm != EffectiveBytesAlgorithm::None {
-            service = service.with_effective_bytes(metrics::counter!("effective_bytes"));
+            service = service.with_effective_bytes(metrics::counter!("effective_bytes_total"));
         }
 
         let batch_settings = self.batch.into_batcher_settings()?;
@@ -714,7 +714,7 @@ mod tests {
                 .build_processor(client, SinkContext::default())
                 .unwrap();
         });
-        recorder.value("effective_bytes").is_some()
+        recorder.value("effective_bytes_total").is_some()
     }
 
     #[tokio::test]
@@ -772,7 +772,7 @@ mod tests {
         };
         sink.run_events(vec![event(), event()]).await.unwrap();
 
-        recorder.value("effective_bytes").unwrap()
+        recorder.value("effective_bytes_total").unwrap()
     }
 
     #[tokio::test]

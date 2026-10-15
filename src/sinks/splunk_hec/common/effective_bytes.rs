@@ -4,8 +4,8 @@ use chrono::{DateTime, Timelike, Utc};
 use vector_lib::configurable::configurable_component;
 use vrl::value::Value;
 
-/// Algorithm used to compute the `vector_effective_bytes` metric - a per-destination approximation
-/// of the bytes the destination actually charges for.
+/// Algorithm used to compute the `vector_effective_bytes_total` metric - a per-destination
+/// approximation of the bytes the destination actually charges for.
 ///
 /// The Observo manager sets this per destination when it generates the Vector config.
 // Phase 2 will add a `RawBytes` variant (Splunk HEC raw ingested volume). It is intentionally
@@ -24,8 +24,8 @@ pub enum EffectiveBytesAlgorithm {
     /// (SDL) billable value bytes (`sca:bytesToCharge`).
     ValueBytes,
 
-    /// Do not compute effective bytes. The `vector_effective_bytes` metric is not emitted, and
-    /// downstream analytics falls back to network/raw bytes.
+    /// Do not compute effective bytes. The `vector_effective_bytes_total` metric is not emitted,
+    /// and downstream analytics falls back to network/raw bytes.
     #[default]
     None,
 }
