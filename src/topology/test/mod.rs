@@ -414,7 +414,8 @@ async fn topology_reload_replaces_sink_that_stops_polling_input() {
         .unwrap();
     sleep(Duration::from_millis(100)).await;
 
-    // Replace it with another sink that gets stuck the same way.
+    // Replace it with a sink that never finishes once its input ends, so the next reload has to
+    // detach a stuck sink that was built by a reload.
     let mut config = Config::builder();
     config.add_source("in1", basic_source().1);
     config.add_sink("out1", &["in1"], backpressure_sink(2));
