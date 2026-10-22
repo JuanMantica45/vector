@@ -12,8 +12,8 @@ use crate::{
     event::{into_event_stream, Event, EventArray, EventContainer, LogEvent},
     test_util::{
         mock::{
-            basic_sink, basic_sink_failing_healthcheck, basic_sink_with_data, basic_source,
-            basic_source_with_data, basic_source_with_event_counter, basic_transform,
+            backpressure_sink, basic_sink, basic_sink_failing_healthcheck, basic_sink_with_data,
+            basic_source, basic_source_with_data, basic_source_with_event_counter, basic_transform,
             error_definition_transform,
         },
         start_topology, trace_init,
@@ -378,6 +378,72 @@ async fn topology_remove_one_sink() {
 
     assert_eq!(vec![event], res1);
     assert_eq!(Vec::<Event>::new(), res2);
+}
+
+#[tokio::test]
+async fn topology_reload_replaces_sink_that_stops_polling_input() {
+    // A changed sink must finish before the reload can hand its buffer to the new sink. A sink
+    // that never polls its input again used to hang the reload forever.
+    // See https://github.com/vectordotdev/vector/issues/26687.
+    async fn reload(topology: &mut RunningTopology, config: Config) {
+        let reloaded = tokio::time::timeout(
+            Duration::from_secs(10),
+            topology.reload_config_and_respawn(config, Default::default()),
+        )
+        .await
+        .expect("reload hung waiting for the old sink")
+        .unwrap();
+        assert!(reloaded);
+    }
+
+    trace_init();
+
+    // Only the startup config carries the graceful shutdown limit, as when it comes from the
+    // command line.
+    let (mut in1, source1) = basic_source();
+    let mut config = Config::builder();
+    config.graceful_shutdown_duration = Some(Duration::from_secs(1));
+    config.add_source("in1", source1);
+    config.add_sink("out1", &["in1"], backpressure_sink(1));
+
+    let (mut topology, _) = start_topology(config.build().unwrap(), false).await;
+
+    // The sink takes this event and then stops polling its input.
+    in1.send_event(Event::Log(LogEvent::from("stuck 1")))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    // Replace it with another sink that gets stuck the same way.
+    let mut config = Config::builder();
+    config.add_source("in1", basic_source().1);
+    config.add_sink("out1", &["in1"], backpressure_sink(2));
+    reload(&mut topology, config.build().unwrap()).await;
+
+    in1.send_event(Event::Log(LogEvent::from("stuck 2")))
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    // Replacing the sink built by the first reload must not hang either.
+    let (out1, sink1) = basic_sink(10);
+    let mut config = Config::builder();
+    config.add_source("in1", basic_source().1);
+    config.add_sink("out1", &["in1"], sink1);
+    reload(&mut topology, config.build().unwrap()).await;
+
+    let mut event = Event::Log(LogEvent::from("delivered"));
+    in1.send_event(event.clone()).await.unwrap();
+
+    topology.stop().await;
+
+    let res = out1.flat_map(into_event_stream).collect::<Vec<_>>().await;
+    event.set_source_id(Arc::new(ComponentKey::from("in1")));
+    event.set_upstream_id(Arc::new(OutputId::from("test")));
+    event
+        .metadata_mut()
+        .set_schema_definition(&Arc::new(Definition::default_legacy_namespace()));
+    assert_eq!(vec![event], res);
 }
 
 #[tokio::test]
