@@ -75,6 +75,13 @@ static TRANSFORM_CONCURRENCY_LIMIT: LazyLock<usize> = LazyLock::new(|| {
 
 const INTERNAL_SOURCES: [&str; 2] = ["internal_logs", "internal_metrics"];
 
+// How long a reload waits for a detached sink before dropping it.
+const SINK_DETACH_LIMIT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(120)
+};
+
 struct Builder<'a> {
     config: &'a super::Config,
     diff: &'a ConfigDiff,
@@ -622,7 +629,10 @@ impl<'a> Builder<'a> {
 
             let (trigger, tripwire) = Tripwire::new();
             let detached = tripwire.clone();
-            let detach_limit = self.config.graceful_shutdown_duration;
+            let detach_limit = self
+                .config
+                .graceful_shutdown_duration
+                .map(|_| SINK_DETACH_LIMIT);
 
             let cx = SinkContext {
                 healthcheck,
@@ -672,9 +682,6 @@ impl<'a> Builder<'a> {
                         .take_until_if(tripwire),
                 );
 
-                // A reload waits for a detached sink to finish before reusing its buffer. A sink
-                // that stops polling its input never finishes, so after the graceful shutdown
-                // limit we drop it (and any events it holds) and hand the buffer back anyway.
                 let abandon = async move {
                     match detach_limit {
                         Some(limit) if detached.await => sleep(limit).await,
@@ -682,27 +689,27 @@ impl<'a> Builder<'a> {
                     }
                 };
 
-                let result = select! {
-                    result = run => result,
+                select! {
+                    result = run => {
+                        result
+                            .map(|_| {
+                                debug!("Sink finished normally.");
+                                TaskOutput::Sink(rx)
+                            })
+                            .map_err(|_| {
+                                debug!("Sink finished with an error.");
+                                TaskError::Opaque
+                            })
+                    }
                     () = abandon => {
                         warn!(
                             message = "Sink did not finish after its inputs were detached; dropping it and any events it has in flight.",
                             limit_secs = detach_limit.unwrap_or_default().as_secs(),
                             internal_log_rate_limit = false,
                         );
-                        Ok(())
+                        Ok(TaskOutput::Sink(rx))
                     }
-                };
-
-                result
-                    .map(|_| {
-                        debug!("Sink finished normally.");
-                        TaskOutput::Sink(rx)
-                    })
-                    .map_err(|_| {
-                        debug!("Sink finished with an error.");
-                        TaskError::Opaque
-                    })
+                }
             };
 
             let task = Task::new(key.clone(), typetag, sink);

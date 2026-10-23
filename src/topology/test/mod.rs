@@ -404,47 +404,55 @@ async fn topology_reload_replaces_sink_that_stops_polling_input() {
     let mut config = Config::builder();
     config.graceful_shutdown_duration = Some(Duration::from_secs(1));
     config.add_source("in1", source1);
-    config.add_sink("out1", &["in1"], backpressure_sink(1));
+    config.add_sink("out1", &["in1"], backpressure_sink(2));
 
     let (mut topology, _) = start_topology(config.build().unwrap(), false).await;
 
-    // The sink takes this event and then stops polling its input.
+    // The sink takes this event and waits for a second one, then never finishes once its input
+    // ends.
     in1.send_event(Event::Log(LogEvent::from("stuck 1")))
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
 
-    // Replace it with a sink that never finishes once its input ends, so the next reload has to
-    // detach a stuck sink that was built by a reload.
+    // Replace it with a sink that takes one event and then stops polling its input, so the next
+    // reload has to detach a stuck sink that was built by a reload.
     let mut config = Config::builder();
     config.add_source("in1", basic_source().1);
-    config.add_sink("out1", &["in1"], backpressure_sink(2));
+    config.add_sink("out1", &["in1"], backpressure_sink(1));
     reload(&mut topology, config.build().unwrap()).await;
 
+    // The sink takes `stuck 2`; `stuck 3` stays in the buffer.
     in1.send_event(Event::Log(LogEvent::from("stuck 2")))
         .await
         .unwrap();
+    let stuck3 = Event::Log(LogEvent::from("stuck 3"));
+    in1.send_event(stuck3.clone()).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
-    // Replacing the sink built by the first reload must not hang either.
+    // Replacing the sink built by the first reload must not hang either, and the new sink gets
+    // `stuck 3` from the reused buffer.
     let (out1, sink1) = basic_sink(10);
     let mut config = Config::builder();
     config.add_source("in1", basic_source().1);
     config.add_sink("out1", &["in1"], sink1);
     reload(&mut topology, config.build().unwrap()).await;
 
-    let mut event = Event::Log(LogEvent::from("delivered"));
-    in1.send_event(event.clone()).await.unwrap();
+    let delivered = Event::Log(LogEvent::from("delivered"));
+    in1.send_event(delivered.clone()).await.unwrap();
 
     topology.stop().await;
 
     let res = out1.flat_map(into_event_stream).collect::<Vec<_>>().await;
-    event.set_source_id(Arc::new(ComponentKey::from("in1")));
-    event.set_upstream_id(Arc::new(OutputId::from("test")));
-    event
-        .metadata_mut()
-        .set_schema_definition(&Arc::new(Definition::default_legacy_namespace()));
-    assert_eq!(vec![event], res);
+    let mut expected = vec![stuck3, delivered];
+    for event in &mut expected {
+        event.set_source_id(Arc::new(ComponentKey::from("in1")));
+        event.set_upstream_id(Arc::new(OutputId::from("test")));
+        event
+            .metadata_mut()
+            .set_schema_definition(&Arc::new(Definition::default_legacy_namespace()));
+    }
+    assert_eq!(expected, res);
 }
 
 #[tokio::test]

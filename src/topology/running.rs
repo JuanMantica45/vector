@@ -227,9 +227,6 @@ impl RunningTopology {
     ) -> Result<bool, ()> {
         info!("Reloading running topology with new configuration.");
 
-        // The graceful shutdown limit comes from the command line, so a config loaded for a
-        // reload doesn't carry it. Keep the running limit so sinks built by this reload are
-        // bounded too when a later reload detaches them.
         new_config.graceful_shutdown_duration = self.graceful_shutdown_duration;
 
         if self.config.global != new_config.global {
