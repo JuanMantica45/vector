@@ -513,12 +513,10 @@ impl RunningTopology {
                 debug!(message = "Waiting for sink to shutdown.", %key);
                 previous.await.unwrap().unwrap();
             } else {
-                debug!(message = "Abandoning sink (without wait)", %key);
                 drop(previous); // detach and forget
             }
         }
 
-        debug!(message = "Now processing changed sinks...");
         let mut buffers = HashMap::<ComponentKey, BuiltBuffer>::new();
         for key in &diff.sinks.to_change {
             if wait_for_sinks.contains(key) {
