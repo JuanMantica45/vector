@@ -4,6 +4,7 @@ use std::{
 
 use futures::{stream::FuturesOrdered, FutureExt, StreamExt, TryStreamExt};
 use futures_util::stream::FuturesUnordered;
+use metrics::counter;
 use stream_cancel::{StreamExt as StreamCancelExt, Trigger, Tripwire};
 use tokio::{
     select,
@@ -707,6 +708,7 @@ impl<'a> Builder<'a> {
                             limit_secs = detach_limit.unwrap_or_default().as_secs(),
                             internal_log_rate_limit = false,
                         );
+                        counter!("sink_detach_timeouts_total").increment(1);
                         Ok(TaskOutput::Sink(rx))
                     }
                 }

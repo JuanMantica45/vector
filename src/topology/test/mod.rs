@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     config::{Config, ConfigDiff, SinkOuter},
-    event::{into_event_stream, Event, EventArray, EventContainer, LogEvent},
+    event::{into_event_stream, Event, EventArray, EventContainer, LogEvent, MetricValue},
     test_util::{
         mock::{
             backpressure_sink, basic_sink, basic_sink_failing_healthcheck, basic_sink_with_data,
@@ -29,6 +29,7 @@ use tokio::{
 use vector_lib::buffers::{BufferConfig, BufferType, WhenFull};
 use vector_lib::config::ComponentKey;
 use vector_lib::config::OutputId;
+use vector_lib::metrics::Controller;
 
 mod backpressure;
 mod compliance;
@@ -453,6 +454,20 @@ async fn topology_reload_replaces_sink_that_stops_polling_input() {
             .set_schema_definition(&Arc::new(Definition::default_legacy_namespace()));
     }
     assert_eq!(expected, res);
+
+    // Both reloads dropped a stuck sink.
+    let dropped: f64 = Controller::get()
+        .unwrap()
+        .capture_metrics()
+        .into_iter()
+        .filter(|m| m.name() == "sink_detach_timeouts_total")
+        .filter(|m| m.tags().and_then(|t| t.get("component_id")) == Some("out1"))
+        .map(|m| match m.value() {
+            MetricValue::Counter { value } => *value,
+            _ => 0.0,
+        })
+        .sum();
+    assert_eq!(dropped, 2.0);
 }
 
 #[tokio::test]
